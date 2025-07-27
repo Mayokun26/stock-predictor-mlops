@@ -3,25 +3,27 @@
 Test script to verify API connections are working
 """
 
-from src.data.kalshi import KalshiClient
+from src.data.alpaca import AlpacaClient
 from src.data.news import NewsClient
 
 
-def test_kalshi():
-    """Test Kalshi API connection"""
-    print("Testing Kalshi API...")
-    client = KalshiClient()
+def test_alpaca():
+    """Test Alpaca API connection"""
+    print("Testing Alpaca API...")
+    client = AlpacaClient()
     
     if client.test_connection():
-        print("✅ Kalshi API connection successful")
+        # Get some positions and popular stocks
+        positions = client.get_positions()
+        stocks = client.get_top_stocks(5)
         
-        # Get a few markets to verify
-        markets = client.get_markets(limit=3)
-        print(f"Found {len(markets)} markets")
-        for market in markets[:2]:
-            print(f"  - {market.get('title', 'Unknown')}")
+        print(f"Current positions: {len(positions)}")
+        for pos in positions:
+            print(f"  - {pos['symbol']}: {pos['qty']} shares, ${pos['market_value']:.2f}")
+            
+        print(f"Popular stocks for testing: {', '.join(stocks)}")
     else:
-        print("❌ Kalshi API connection failed")
+        print("❌ Alpaca API connection failed")
 
 
 def test_news():
@@ -42,6 +44,6 @@ def test_news():
 
 
 if __name__ == "__main__":
-    test_kalshi()
+    test_alpaca()
     test_news()
     print("\nAPI testing complete!")
