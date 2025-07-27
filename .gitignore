@@ -128,4 +128,4 @@ config/secrets.yaml
 
 # Temporary files
 tmp/
-temp/
+temp/.env
