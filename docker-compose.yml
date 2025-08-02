@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./stocks.db:/app/stocks.db
+      - ./mlruns:/app/mlruns
+    environment:
+      - MLFLOW_TRACKING_URI=file:///app/mlruns
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  mlflow:
+    image: python:3.9-slim
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./mlruns:/mlruns
+    working_dir: /mlruns
+    command: >
+      bash -c "pip install mlflow && 
+               mlflow server --host 0.0.0.0 --port 5000 --backend-store-uri file:///mlruns"
+    restart: unless-stopped
+
+  data-collector:
+    build: .
+    volumes:
+      - ./stocks.db:/app/stocks.db
+      - ./.env:/app/.env
+    command: python collect_data.py
+    depends_on:
+      - api
+    restart: "no"  # Run once, don't restart
+
+networks:
+  default:
+    name: mlops-network
