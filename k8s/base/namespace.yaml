@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mlops-system
+  labels:
+    name: mlops-system
+    purpose: production-mlops
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mlops-monitoring
+  labels:
+    name: mlops-monitoring
+    purpose: observability
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mlops-data
+  labels:
+    name: mlops-data
+    purpose: data-storage

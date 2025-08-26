@@ -48,7 +48,7 @@ async def load_models():
     print("Loading ML models...")
     # In production, load from MLflow model registry
     # For now, we'll use a simple approach
-    print("✅ Models loaded successfully")
+    print("Models loaded successfully")
 
 def get_latest_stock_data(symbol: str) -> Dict:
     """Get latest stock data from database"""
@@ -69,7 +69,7 @@ def get_latest_stock_data(symbol: str) -> Dict:
     conn.close()
     
     if len(df) == 0:
-        raise HTTPException(status_code=404, f"No data found for {symbol}")
+        raise HTTPException(status_code=404, detail=f"No data found for {symbol}")
     
     return {
         'prices': df,

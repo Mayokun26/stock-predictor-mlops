@@ -1,21 +1,86 @@
-requests>=2.31.0
-python-dotenv>=1.0.0
-pandas>=2.0.0
+# Core ML and Data Science
 numpy>=1.24.0
+pandas>=2.0.0
 scikit-learn>=1.3.0
-transformers>=4.30.0
+xgboost>=1.7.0
+lightgbm>=4.0.0
+
+# Deep Learning and NLP
 torch>=2.1.0
+transformers>=4.30.0
+sentence-transformers>=2.2.0
+nltk>=3.8
+textblob>=0.17.1
+
+# Data Collection and APIs
+aiohttp>=3.8.0
+requests>=2.31.0
+yfinance>=0.2.0
+alpaca-trade-api>=3.0.0
+beautifulsoup4>=4.12.0
+tweepy>=4.14.0
+
+# Database and Caching
+redis>=5.0.0
+psycopg2-binary>=2.9.0
+sqlalchemy>=2.0.0
+alembic>=1.12.0
+
+# MLOps and Experiment Tracking
+mlflow>=2.8.0
+feast>=0.32.0
+prefect>=2.14.0
+wandb>=0.16.0
+
+# API and Web Framework
 fastapi>=0.100.0
 uvicorn[standard]>=0.22.0
 pydantic>=2.0.0
-httpx>=0.24.0
-alpaca-trade-api>=3.0.0
-yfinance>=0.2.0
-sqlalchemy>=2.0.0
-alembic>=1.12.0
-mlflow>=2.8.0
-joblib>=1.3.0
+python-jose[cryptography]>=3.3.0
+passlib[bcrypt]>=1.7.4
 python-multipart>=0.0.6
+slowapi>=0.1.8
+
+# Monitoring and Observability
 prometheus-client>=0.19.0
+prometheus-fastapi-instrumentator>=6.1.0
+opentelemetry-api>=1.20.0
+opentelemetry-sdk>=1.20.0
+opentelemetry-instrumentation-fastapi>=0.41b0
+structlog>=23.2.0
+
+# Data Validation and Quality
+great-expectations>=0.17.0
+pydantic>=2.0.0
+marshmallow>=3.20.0
+
+# Testing
 pytest>=7.4.0
 pytest-asyncio>=0.21.0
+pytest-cov>=4.1.0
+httpx>=0.24.0
+
+# Utilities
+python-dotenv>=1.0.0
+click>=8.1.0
+tqdm>=4.65.0
+python-dateutil>=2.8.0
+pytz>=2023.3
+joblib>=1.3.0
+
+# Data Processing and Analysis
+scipy>=1.11.0
+statsmodels>=0.14.0
+ta>=0.10.0  # Technical analysis
+plotly>=5.17.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# Cloud and Infrastructure
+boto3>=1.29.0
+kubernetes>=28.1.0
+docker>=6.1.0
+
+# Additional Financial APIs
+alpha-vantage>=2.3.1
+polygon-api-client>=1.12.0

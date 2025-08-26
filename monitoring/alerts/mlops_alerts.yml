@@ -1,0 +1,211 @@
+groups:
+- name: mlops_critical_alerts
+  rules:
+  - alert: MLOpsAPIDown
+    expr: up{job="mlops-api"} == 0
+    for: 1m
+    labels:
+      severity: critical
+      team: mlops
+    annotations:
+      summary: "MLOps API is down"
+      description: "The MLOps prediction API has been down for more than 1 minute."
+      runbook_url: "https://wiki.company.com/runbooks/mlops-api-down"
+
+  - alert: ModelAccuracyDegraded
+    expr: model_accuracy < 0.6
+    for: 10m
+    labels:
+      severity: critical
+      team: mlops
+      model_version: "{{ $labels.model_version }}"
+    annotations:
+      summary: "Model accuracy has degraded below 60%"
+      description: "Model {{ $labels.model_version }} accuracy is {{ $value | humanizePercentage }}, below the 60% threshold."
+      runbook_url: "https://wiki.company.com/runbooks/model-accuracy-degraded"
+
+  - alert: DataDriftDetected
+    expr: data_drift_score > 0.25
+    for: 5m
+    labels:
+      severity: warning
+      team: mlops
+      feature: "{{ $labels.feature }}"
+    annotations:
+      summary: "Data drift detected in feature {{ $labels.feature }}"
+      description: "Feature {{ $labels.feature }} has a drift score of {{ $value }}, indicating significant data distribution changes."
+      runbook_url: "https://wiki.company.com/runbooks/data-drift-detected"
+
+- name: mlops_performance_alerts
+  rules:
+  - alert: HighPredictionLatency
+    expr: histogram_quantile(0.95, rate(prediction_request_duration_seconds_bucket[5m])) > 2.0
+    for: 5m
+    labels:
+      severity: warning
+      team: mlops
+    annotations:
+      summary: "High prediction latency detected"
+      description: "95th percentile prediction latency is {{ $value }}s, above the 2s threshold."
+      runbook_url: "https://wiki.company.com/runbooks/high-latency"
+
+  - alert: LowPredictionVolume
+    expr: rate(predictions_total[1h]) * 3600 < 10
+    for: 15m
+    labels:
+      severity: warning
+      team: mlops
+    annotations:
+      summary: "Low prediction volume"
+      description: "Prediction rate has dropped to {{ $value }} predictions per hour."
+      runbook_url: "https://wiki.company.com/runbooks/low-prediction-volume"
+
+  - alert: HighErrorRate
+    expr: rate(prediction_errors_total[5m]) > 0.1
+    for: 3m
+    labels:
+      severity: warning
+      team: mlops
+      error_type: "{{ $labels.error_type }}"
+    annotations:
+      summary: "High error rate in predictions"
+      description: "Error rate for {{ $labels.error_type }} is {{ $value }} errors per second."
+      runbook_url: "https://wiki.company.com/runbooks/high-error-rate"
+
+- name: mlops_infrastructure_alerts  
+  rules:
+  - alert: PostgreSQLConnectionsHigh
+    expr: postgresql_connections_active / postgresql_connections_max * 100 > 85
+    for: 5m
+    labels:
+      severity: warning
+      team: mlops
+    annotations:
+      summary: "PostgreSQL connection pool near capacity"
+      description: "PostgreSQL is using {{ $value }}% of available connections."
+      runbook_url: "https://wiki.company.com/runbooks/postgresql-connections-high"
+
+  - alert: RedisMemoryHigh
+    expr: redis_memory_used_bytes / redis_memory_max_bytes * 100 > 80
+    for: 5m
+    labels:
+      severity: warning
+      team: mlops
+    annotations:
+      summary: "Redis memory usage high"
+      description: "Redis is using {{ $value }}% of allocated memory."
+      runbook_url: "https://wiki.company.com/runbooks/redis-memory-high"
+
+  - alert: FeatureStoreCacheMissRateHigh
+    expr: rate(feature_store_cache_misses_total[5m]) / (rate(feature_store_cache_hits_total[5m]) + rate(feature_store_cache_misses_total[5m])) > 0.5
+    for: 10m
+    labels:
+      severity: warning
+      team: mlops
+    annotations:
+      summary: "Feature store cache miss rate is high"
+      description: "Cache miss rate is {{ $value | humanizePercentage }}, indicating potential performance issues."
+      runbook_url: "https://wiki.company.com/runbooks/cache-miss-rate-high"
+
+- name: mlops_business_alerts
+  rules:
+  - alert: NegativeROIDetected
+    expr: model_roi_daily < 0
+    for: 1h
+    labels:
+      severity: warning
+      team: mlops
+      model_version: "{{ $labels.model_version }}"
+    annotations:
+      summary: "Model showing negative ROI"
+      description: "Model {{ $labels.model_version }} has negative ROI of {{ $value }}% over the past day."
+      runbook_url: "https://wiki.company.com/runbooks/negative-roi"
+
+  - alert: TradingVolumeAnomalyDetected
+    expr: abs(trading_volume_today - trading_volume_7d_avg) / trading_volume_7d_avg > 2.0
+    for: 30m
+    labels:
+      severity: warning
+      team: mlops
+    annotations:
+      summary: "Trading volume anomaly detected"
+      description: "Today's trading volume deviates {{ $value | humanizePercentage }} from the 7-day average."
+      runbook_url: "https://wiki.company.com/runbooks/trading-volume-anomaly"
+
+- name: mlops_data_quality_alerts
+  rules:
+  - alert: StaleDataDetected
+    expr: (time() - data_freshness_timestamp) / 3600 > 4
+    for: 1m
+    labels:
+      severity: warning
+      team: mlops
+      data_source: "{{ $labels.data_source }}"
+    annotations:
+      summary: "Stale data detected in {{ $labels.data_source }}"
+      description: "Data from {{ $labels.data_source }} is {{ $value }} hours old."
+      runbook_url: "https://wiki.company.com/runbooks/stale-data"
+
+  - alert: DataQualityScoreLow
+    expr: data_quality_score < 0.7
+    for: 5m
+    labels:
+      severity: warning
+      team: mlops
+      dataset: "{{ $labels.dataset }}"
+    annotations:
+      summary: "Data quality score low for {{ $labels.dataset }}"
+      description: "Data quality score for {{ $labels.dataset }} is {{ $value }}, below the 0.7 threshold."
+      runbook_url: "https://wiki.company.com/runbooks/data-quality-low"
+
+- name: mlops_ab_testing_alerts
+  rules:
+  - alert: ABTestStatisticalSignificanceAchieved
+    expr: ab_test_p_value < 0.05 and ab_test_sample_size > ab_test_minimum_sample_size
+    for: 1m
+    labels:
+      severity: info
+      team: mlops
+      experiment_id: "{{ $labels.experiment_id }}"
+    annotations:
+      summary: "A/B test {{ $labels.experiment_id }} has achieved statistical significance"
+      description: "Experiment {{ $labels.experiment_id }} has p-value {{ $value }} with sufficient sample size."
+      runbook_url: "https://wiki.company.com/runbooks/ab-test-significance"
+
+  - alert: ABTestImbalancedTrafficDetected
+    expr: abs(ab_test_traffic_variant_a - ab_test_traffic_variant_b) > 0.1
+    for: 30m
+    labels:
+      severity: warning
+      team: mlops
+      experiment_id: "{{ $labels.experiment_id }}"
+    annotations:
+      summary: "A/B test traffic imbalance detected"
+      description: "Traffic split for {{ $labels.experiment_id }} is imbalanced by {{ $value | humanizePercentage }}."
+      runbook_url: "https://wiki.company.com/runbooks/ab-test-imbalance"
+
+- name: mlops_model_lifecycle_alerts
+  rules:
+  - alert: ModelEvaluationFailed
+    expr: increase(model_evaluation_failures_total[1h]) > 0
+    for: 1m
+    labels:
+      severity: warning
+      team: mlops
+      model_version: "{{ $labels.model_version }}"
+    annotations:
+      summary: "Model evaluation failed for {{ $labels.model_version }}"
+      description: "Model evaluation process failed {{ $value }} times in the past hour."
+      runbook_url: "https://wiki.company.com/runbooks/model-evaluation-failed"
+
+  - alert: ChampionChallengerRecommendation
+    expr: challenger_outperforms_champion == 1
+    for: 5m
+    labels:
+      severity: info
+      team: mlops
+      challenger_version: "{{ $labels.challenger_version }}"
+    annotations:
+      summary: "Challenger model {{ $labels.challenger_version }} recommended for promotion"
+      description: "Challenger model consistently outperforms champion across key metrics."
+      runbook_url: "https://wiki.company.com/runbooks/champion-challenger-promotion"
