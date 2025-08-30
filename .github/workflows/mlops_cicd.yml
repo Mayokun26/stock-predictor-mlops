@@ -2,7 +2,7 @@ name: MLOps CI/CD Pipeline
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main, develop]  # Enable on main branch
     paths:
     - 'src/**'
     - 'models/**'
@@ -10,6 +10,7 @@ on:
     - 'Dockerfile'
     - 'docker-compose.yml'
     - 'k8s/**'
+    - 'working_api.py'
   pull_request:
     branches: [main]
 

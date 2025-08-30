@@ -452,6 +452,32 @@ class ABTestManager:
             'duration_days': (datetime.now() - test_data.get('start_time', test_data['created_at'])).days,
             'traffic_split': config.traffic_split
         }
+    
+    def assign_user_to_test(self, user_id: str, test_id: str = None) -> str:
+        """Assign user to A/B test variant"""
+        try:
+            # Simple hash-based assignment for consistent user experience
+            import hashlib
+            
+            # If no specific test, use default behavior (champion)
+            if test_id and test_id in self.active_tests:
+                config = self.active_tests[test_id]['config']
+                
+                # Hash user ID to get consistent assignment
+                user_hash = int(hashlib.md5(user_id.encode()).hexdigest(), 16)
+                assignment_value = (user_hash % 100) / 100.0
+                
+                if assignment_value < config.traffic_split:
+                    return 'challenger'
+                else:
+                    return 'champion'
+            else:
+                # Default to champion if no active test
+                return 'champion'
+                
+        except Exception as e:
+            logger.error(f"Error assigning user to test: {e}")
+            return 'champion'  # Default to champion on error
 
 def test_ab_testing():
     """Test A/B testing framework"""
