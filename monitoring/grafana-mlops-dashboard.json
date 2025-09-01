@@ -1,0 +1,194 @@
+{
+  "dashboard": {
+    "id": null,
+    "title": "MLOps Stock Prediction System",
+    "tags": ["mlops", "stock", "prediction"],
+    "style": "dark",
+    "timezone": "browser",
+    "panels": [
+      {
+        "id": 1,
+        "title": "Predictions Per Minute",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "rate(predictions_total[1m])",
+            "legendFormat": "Predictions/min"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 6, "x": 0, "y": 0},
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "palette-classic"},
+            "unit": "reqps",
+            "thresholds": {
+              "steps": [
+                {"color": "green", "value": null},
+                {"color": "yellow", "value": 5},
+                {"color": "red", "value": 10}
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 2,
+        "title": "Prediction Latency",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, rate(prediction_duration_seconds_bucket[5m]))",
+            "legendFormat": "95th Percentile"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 6, "x": 6, "y": 0},
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "palette-classic"},
+            "unit": "s",
+            "thresholds": {
+              "steps": [
+                {"color": "green", "value": null},
+                {"color": "yellow", "value": 2},
+                {"color": "red", "value": 5}
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 3,
+        "title": "Feature Store Cache Hit Rate",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "rate(feature_store_hits_total[5m]) / (rate(feature_store_hits_total[5m]) + rate(feature_store_misses_total[5m])) * 100",
+            "legendFormat": "Cache Hit %"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 6, "x": 12, "y": 0},
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "palette-classic"},
+            "unit": "percent",
+            "thresholds": {
+              "steps": [
+                {"color": "red", "value": null},
+                {"color": "yellow", "value": 70},
+                {"color": "green", "value": 90}
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 4,
+        "title": "Database Operations",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "rate(database_operations_total[1m])",
+            "legendFormat": "DB Ops/min"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 6, "x": 18, "y": 0},
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "palette-classic"},
+            "unit": "ops"
+          }
+        }
+      },
+      {
+        "id": 5,
+        "title": "Predictions by Symbol",
+        "type": "piechart",
+        "targets": [
+          {
+            "expr": "predictions_total",
+            "legendFormat": "{{symbol}}"
+          }
+        ],
+        "gridPos": {"h": 9, "w": 12, "x": 0, "y": 8}
+      },
+      {
+        "id": 6,
+        "title": "Response Time Distribution",
+        "type": "heatmap",
+        "targets": [
+          {
+            "expr": "rate(prediction_duration_seconds_bucket[5m])",
+            "legendFormat": "{{le}}"
+          }
+        ],
+        "gridPos": {"h": 9, "w": 12, "x": 12, "y": 8}
+      },
+      {
+        "id": 7,
+        "title": "System Health Timeline",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "rate(predictions_total[1m])",
+            "legendFormat": "Predictions/min"
+          },
+          {
+            "expr": "rate(feature_store_hits_total[1m])",
+            "legendFormat": "Cache Hits/min"
+          },
+          {
+            "expr": "rate(database_operations_total[1m])",
+            "legendFormat": "DB Operations/min"
+          }
+        ],
+        "gridPos": {"h": 9, "w": 24, "x": 0, "y": 17},
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "palette-classic"},
+            "unit": "reqps"
+          }
+        }
+      },
+      {
+        "id": 8,
+        "title": "Model Performance by Version",
+        "type": "table",
+        "targets": [
+          {
+            "expr": "predictions_total",
+            "legendFormat": "{{model_version}} - {{symbol}}",
+            "format": "table"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 26}
+      },
+      {
+        "id": 9,
+        "title": "Feature Store Performance",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "rate(feature_store_hits_total[1m])",
+            "legendFormat": "Cache Hits"
+          },
+          {
+            "expr": "rate(feature_store_misses_total[1m])",
+            "legendFormat": "Cache Misses"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 26},
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "palette-classic"},
+            "unit": "reqps"
+          }
+        }
+      }
+    ],
+    "time": {"from": "now-1h", "to": "now"},
+    "refresh": "5s",
+    "schemaVersion": 16,
+    "version": 0,
+    "links": []
+  }
+}

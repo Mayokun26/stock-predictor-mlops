@@ -37,6 +37,7 @@ ENV/
 mlruns/
 Stock price prediction model for*/
 *.db
+mlflow.db
 
 # Generated reports and logs
 *report.txt
@@ -68,3 +69,13 @@ tmp/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Backup files
+*~
+*.bak
+*.orig
+
+# Environment files
+.env
+.env.local
+.env.*.local
