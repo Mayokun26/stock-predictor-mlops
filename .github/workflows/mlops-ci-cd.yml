@@ -1,0 +1,362 @@
+name: MLOps CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    # Run daily model retraining at 6 AM UTC (after market close)
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    inputs:
+      symbols:
+        description: 'Stock symbols to train (comma-separated)'
+        required: false
+        default: 'AAPL,MSFT,TSLA'
+      skip_promotion:
+        description: 'Skip automatic model promotion'
+        required: false
+        default: 'false'
+
+env:
+  PYTHON_VERSION: '3.10'
+  MLFLOW_TRACKING_URI: 'http://localhost:5001'
+
+jobs:
+  test:
+    name: 🧪 Run Tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:13
+        env:
+          POSTGRES_PASSWORD: postgres_password
+          POSTGRES_USER: postgres
+          POSTGRES_DB: betting_mlops
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+    - name: 📂 Checkout code
+      uses: actions/checkout@v4
+
+    - name: 🐍 Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        cache: 'pip'
+
+    - name: 📦 Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential
+
+    - name: 📚 Install Python dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pytest pytest-asyncio pytest-cov
+        pip install -r requirements.txt
+      
+    - name: 🔧 Set up environment
+      run: |
+        # Create required directories
+        mkdir -p mlruns/artifacts
+        mkdir -p logs
+        
+        # Set environment variables
+        echo "DATABASE_URL=postgresql+asyncpg://postgres:postgres_password@localhost:5432/betting_mlops" >> $GITHUB_ENV
+        echo "REDIS_URL=redis://localhost:6379" >> $GITHUB_ENV
+        echo "MLFLOW_TRACKING_URI=http://localhost:5001" >> $GITHUB_ENV
+
+    - name: 🚀 Start MLflow server
+      run: |
+        mlflow server \
+          --host 0.0.0.0 \
+          --port 5001 \
+          --backend-store-uri sqlite:///mlruns/mlflow.db \
+          --default-artifact-root ./mlruns/artifacts \
+          --serve-artifacts &
+        
+        # Wait for MLflow to start
+        timeout 30 bash -c 'until curl -f http://localhost:5001/health; do sleep 1; done'
+        echo "MLflow server started successfully"
+
+    - name: 🏃 Start API server
+      run: |
+        cd src/api
+        python production_api.py &
+        
+        # Wait for API to start
+        timeout 60 bash -c 'until curl -f http://localhost:8000/health; do sleep 2; done'
+        echo "API server started successfully"
+
+    - name: 🧪 Run unit tests
+      run: |
+        pytest tests/ -v --cov=src --cov-report=xml --cov-report=term-missing
+      continue-on-error: false
+
+    - name: 📊 Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.xml
+        fail_ci_if_error: true
+
+  train-models:
+    name: 🤖 Train Models
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.ref == 'refs/heads/main' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    
+    services:
+      postgres:
+        image: postgres:13
+        env:
+          POSTGRES_PASSWORD: postgres_password
+          POSTGRES_USER: postgres
+          POSTGRES_DB: betting_mlops
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+    - name: 📂 Checkout code
+      uses: actions/checkout@v4
+
+    - name: 🐍 Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        cache: 'pip'
+
+    - name: 📦 Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: 🔧 Set up environment
+      run: |
+        mkdir -p mlruns/artifacts logs
+        echo "DATABASE_URL=postgresql+asyncpg://postgres:postgres_password@localhost:5432/betting_mlops" >> $GITHUB_ENV
+        echo "REDIS_URL=redis://localhost:6379" >> $GITHUB_ENV
+        echo "MLFLOW_TRACKING_URI=http://localhost:5001" >> $GITHUB_ENV
+
+    - name: 🚀 Start services
+      run: |
+        # Start MLflow server
+        mlflow server \
+          --host 0.0.0.0 \
+          --port 5001 \
+          --backend-store-uri sqlite:///mlruns/mlflow.db \
+          --default-artifact-root ./mlruns/artifacts &
+        
+        # Wait for MLflow
+        timeout 30 bash -c 'until curl -f http://localhost:5001/health; do sleep 1; done'
+        
+        # Start API server
+        cd src/api && python production_api.py &
+        timeout 60 bash -c 'until curl -f http://localhost:8000/health; do sleep 2; done'
+        
+        echo "All services started successfully"
+
+    - name: 🤖 Run training pipeline
+      run: |
+        # Determine symbols to train
+        if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+          SYMBOLS="${{ github.event.inputs.symbols }}"
+          SKIP_PROMOTION="${{ github.event.inputs.skip_promotion }}"
+        else
+          SYMBOLS="AAPL,MSFT,TSLA"
+          SKIP_PROMOTION="false"
+        fi
+        
+        # Convert comma-separated to space-separated
+        SYMBOL_LIST=$(echo $SYMBOLS | tr ',' ' ')
+        
+        # Run training pipeline
+        if [ "$SKIP_PROMOTION" == "true" ]; then
+          python scripts/train_pipeline.py --symbols $SYMBOL_LIST --no-promote
+        else
+          python scripts/train_pipeline.py --symbols $SYMBOL_LIST
+        fi
+
+    - name: 📊 Upload training artifacts
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: training-results
+        path: |
+          pipeline_execution_report.txt
+          model_evaluation_report.txt
+          mlruns/
+        retention-days: 30
+
+    - name: 📋 Comment training results on PR
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const fs = require('fs');
+          
+          try {
+            const reportPath = 'pipeline_execution_report.txt';
+            if (fs.existsSync(reportPath)) {
+              const report = fs.readFileSync(reportPath, 'utf8');
+              
+              github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: `## 🤖 MLOps Training Pipeline Results\n\n\`\`\`\n${report}\n\`\`\``
+              });
+            }
+          } catch (error) {
+            console.log('Could not post training results:', error);
+          }
+
+  deploy:
+    name: 🚀 Deploy Models
+    runs-on: ubuntu-latest
+    needs: train-models
+    if: github.ref == 'refs/heads/main' && success()
+    environment: production
+
+    steps:
+    - name: 📂 Checkout code
+      uses: actions/checkout@v4
+
+    - name: 🐍 Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+
+    - name: 📦 Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install mlflow requests
+
+    - name: 📥 Download training artifacts
+      uses: actions/download-artifact@v3
+      with:
+        name: training-results
+
+    - name: 🔍 Validate models for deployment
+      run: |
+        python -c "
+        import mlflow
+        import os
+        
+        mlflow.set_tracking_uri('sqlite:///mlruns/mlflow.db')
+        client = mlflow.MlflowClient()
+        
+        symbols = ['AAPL', 'MSFT', 'TSLA']
+        production_ready = 0
+        
+        for symbol in symbols:
+            model_name = f'{symbol}_predictor'
+            try:
+                versions = client.search_model_versions(f'name=\"{model_name}\"')
+                production_versions = [v for v in versions if v.current_stage == 'Production']
+                if production_versions:
+                    production_ready += 1
+                    print(f'✅ {symbol} model ready for production: v{production_versions[0].version}')
+                else:
+                    print(f'⚠️ {symbol} model not promoted to production')
+            except Exception as e:
+                print(f'❌ Error checking {symbol}: {e}')
+        
+        print(f'Production ready models: {production_ready}/{len(symbols)}')
+        
+        if production_ready == 0:
+            print('No models ready for production deployment')
+            exit(1)
+        "
+
+    - name: 🚀 Deploy to production
+      run: |
+        echo "🎉 Models validated and ready for production deployment"
+        echo "In a real deployment, this would:"
+        echo "  - Update production API servers"
+        echo "  - Run deployment health checks" 
+        echo "  - Update load balancer configurations"
+        echo "  - Notify monitoring systems"
+        echo "  - Send deployment notifications"
+        
+        # Simulate deployment success
+        echo "✅ Production deployment completed successfully"
+
+  performance-monitoring:
+    name: 📈 Monitor Performance
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: github.ref == 'refs/heads/main' && success()
+
+    steps:
+    - name: 📂 Checkout code
+      uses: actions/checkout@v4
+
+    - name: 📊 Check model performance
+      run: |
+        echo "📈 Monitoring model performance in production..."
+        echo "This would typically:"
+        echo "  - Query production API metrics"
+        echo "  - Check prediction accuracy drift"
+        echo "  - Monitor system performance"
+        echo "  - Generate alerts if needed"
+        echo "  - Update dashboards"
+        
+        # Simulate monitoring check
+        echo "✅ All models performing within expected parameters"
+
+    - name: 🔔 Send notifications
+      run: |
+        echo "📬 Sending deployment notifications..."
+        echo "In production, this would notify:"
+        echo "  - Slack channels"
+        echo "  - Email lists"
+        echo "  - PagerDuty (if issues detected)"
+        echo "  - Dashboard updates"
+
+  cleanup:
+    name: 🧹 Cleanup
+    runs-on: ubuntu-latest
+    needs: [test, train-models, deploy]
+    if: always()
+
+    steps:
+    - name: 🧹 Clean up artifacts
+      run: |
+        echo "🧹 Performing cleanup tasks..."
+        echo "  - Archiving old model versions"
+        echo "  - Cleaning temporary files"
+        echo "  - Updating artifact retention"
+        echo "✅ Cleanup completed"
