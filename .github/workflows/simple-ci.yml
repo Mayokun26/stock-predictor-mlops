@@ -1,0 +1,55 @@
+name: Simple MLOps CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pytest scikit-learn pandas numpy yfinance fastapi
+        pip install mlflow redis asyncpg sqlalchemy prometheus-client
+    
+    - name: Run basic tests
+      run: |
+        python -c "import pandas as pd; print('✅ Pandas working')"
+        python -c "import sklearn; print('✅ Scikit-learn working')" 
+        python -c "import mlflow; print('✅ MLflow working')"
+        python -c "from train_model_with_mlflow import create_advanced_features; print('✅ Advanced features working')"
+        
+    - name: Test feature engineering
+      run: |
+        python -c "
+        from train_model_with_mlflow import create_advanced_features
+        import yfinance as yf
+        ticker = yf.Ticker('AAPL')
+        hist = ticker.history(period='1mo')
+        features = create_advanced_features(hist)
+        print(f'✅ Generated {len(features)} features successfully')
+        assert len(features) == 39, f'Expected 39 features, got {len(features)}'
+        print('✅ All 39 advanced indicators working!')
+        "
+        
+    - name: Test hyperparameter optimization imports
+      run: |
+        python -c "
+        from train_model_with_mlflow import hyperparameter_optimization
+        from sklearn.ensemble import RandomForestRegressor
+        from sklearn.model_selection import GridSearchCV, RandomizedSearchCV
+        import numpy as np
+        print('✅ Hyperparameter tuning imports working')
+        "
