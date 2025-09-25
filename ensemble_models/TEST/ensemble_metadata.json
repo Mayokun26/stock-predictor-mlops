@@ -1,0 +1,14 @@
+{
+  "symbol": "TEST",
+  "ensemble_weights": {
+    "rf": 0.4,
+    "xgb": 0.4,
+    "lstm": 0.2
+  },
+  "models_saved": {
+    "random_forest": true,
+    "xgboost": true,
+    "lstm": false
+  },
+  "save_date": "2025-09-01T22:00:18.106479"
+}

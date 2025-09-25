@@ -39,14 +39,86 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 import joblib
 
+# Add monitoring directory to path for drift detection
+monitoring_path = os.path.join(os.path.dirname(__file__), '..', 'monitoring')
+if monitoring_path not in sys.path:
+    sys.path.append(monitoring_path)
+
+# Add models directory to path for ensemble models
+models_path = os.path.join(os.path.dirname(__file__), '..', 'models')
+if models_path not in sys.path:
+    sys.path.append(models_path)
+
+# Add LLM directory to path
+llm_path = os.path.join(os.path.dirname(__file__), '..', 'llm')
+if llm_path not in sys.path:
+    sys.path.append(llm_path)
+
+# Add RAG directory to path
+rag_path = os.path.join(os.path.dirname(__file__), '..', 'rag')
+if rag_path not in sys.path:
+    sys.path.append(rag_path)
+
+try:
+    from drift_detector import ModelDriftDetector
+    DRIFT_DETECTION_AVAILABLE = True
+except ImportError as e:
+    DRIFT_DETECTION_AVAILABLE = False
+    ModelDriftDetector = None
+
+try:
+    from ensemble_predictor import MultiModelEnsemble
+    ENSEMBLE_MODELS_AVAILABLE = True
+except ImportError as e:
+    ENSEMBLE_MODELS_AVAILABLE = False
+    MultiModelEnsemble = None
+
+try:
+    from llm_service import LLMService, LLMRequest, LLMResponse
+    LLM_AVAILABLE = True
+except ImportError as e:
+    LLM_AVAILABLE = False
+    LLMService = None
+
+try:
+    from vector_store import RAGService
+    RAG_AVAILABLE = True
+except ImportError as e:
+    RAG_AVAILABLE = False
+    RAGService = None
+
 # Configuration from environment (use localhost when running outside Docker)
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://postgres:postgres_password@localhost:5432/betting_mlops")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
-MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5001")
+MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5000")
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Log drift detection status
+if DRIFT_DETECTION_AVAILABLE:
+    logger.info("✅ Drift detection system loaded")
+else:
+    logger.warning("⚠️ Drift detection not available - install scipy for full functionality")
+
+# Log ensemble models status
+if ENSEMBLE_MODELS_AVAILABLE:
+    logger.info("✅ Multi-model ensemble system loaded")
+else:
+    logger.warning("⚠️ Ensemble models not available - install xgboost for full functionality")
+
+# Log LLM service status
+if LLM_AVAILABLE:
+    logger.info("✅ LLM service loaded for prediction explanations")
+else:
+    logger.warning("⚠️ LLM service not available - install openai for explanations")
+
+# Log RAG service status
+if RAG_AVAILABLE:
+    logger.info("✅ RAG service loaded for enhanced market research")
+else:
+    logger.warning("⚠️ RAG service not available - install sentence-transformers for enhanced research")
 
 # Clear Prometheus registry to avoid conflicts
 from prometheus_client import CollectorRegistry, REGISTRY
@@ -62,6 +134,10 @@ PREDICTION_LATENCY = Histogram('prediction_duration_seconds', 'Time spent on pre
 MODEL_ACCURACY = Gauge('model_accuracy', 'Current model accuracy', ['symbol', 'model_version'])
 FEATURE_STORE_HITS = Counter('feature_store_hits_total', 'Feature store cache hits')
 FEATURE_STORE_MISSES = Counter('feature_store_misses_total', 'Feature store cache misses')
+LLM_REQUESTS = Counter('llm_requests_total', 'Total LLM requests', ['model', 'request_type'])
+LLM_LATENCY = Histogram('llm_response_time_seconds', 'LLM response time')
+LLM_TOKENS = Counter('llm_tokens_total', 'Total tokens used', ['model'])
+LLM_COST = Gauge('llm_cost_estimate_usd', 'Estimated LLM costs')
 DATABASE_OPERATIONS = Counter('database_operations_total', 'Database operations', ['operation'])
 
 # Database models
@@ -115,10 +191,47 @@ class PredictionResponse(BaseModel):
     processing_time_ms: float
     user_id: Optional[str]
 
+class ExplanationRequest(BaseModel):
+    symbol: str = Field(..., description="Stock symbol (e.g., AAPL)")
+    prediction_id: Optional[str] = Field(None, description="Prediction ID to explain")
+    include_risk_assessment: bool = Field(True, description="Include risk analysis")
+    user_id: Optional[str] = Field(None, description="User identifier")
+
+class ExplanationResponse(BaseModel):
+    symbol: str
+    explanation: str
+    risk_assessment: Optional[str]
+    model_used: str
+    tokens_used: int
+    cost_estimate: float
+    cached: bool
+    timestamp: str
+    processing_time_ms: float
+
+class MarketResearchRequest(BaseModel):
+    query: str = Field(..., description="Market research query")
+    symbols: Optional[List[str]] = Field(default=[], description="Related symbols to analyze")
+    include_sentiment: bool = Field(True, description="Include sentiment analysis")
+    user_id: Optional[str] = Field(None, description="User identifier")
+
+class MarketResearchResponse(BaseModel):
+    query: str
+    analysis: str
+    symbols_analyzed: List[str]
+    market_data_used: Dict[str, Any]
+    model_used: str
+    tokens_used: int
+    cost_estimate: float
+    cached: bool
+    timestamp: str
+    processing_time_ms: float
+
 # Global connections
 db_engine = None
 redis_client = None
 mlflow_client = None
+llm_service = None
+rag_service = None
 
 # Enhanced feature engineering
 class AdvancedFeatureEngine:
@@ -707,16 +820,32 @@ class ProductionMLModel:
         self.scaler_fitted = False
         self.model_version = "production_v1.0"
         self.feature_names = []
+        # Model cache for faster loading
+        self.model_cache = {}
+        self.cache_timeout = 3600  # 1 hour cache
     
     async def load_or_train_model(self, symbol: str):
         """Load existing model or train new one with comprehensive MLflow integration"""
         try:
+            # Check cache first for faster loading
+            import time
+            cache_key = f"{symbol}_{self.model_version}"
+            current_time = time.time()
+            
+            if cache_key in self.model_cache:
+                cached_data = self.model_cache[cache_key]
+                if current_time - cached_data['timestamp'] < self.cache_timeout:
+                    self.model = cached_data['model']
+                    self.scaler = cached_data['scaler'] 
+                    self.scaler_fitted = cached_data['scaler_fitted']
+                    logger.info(f"✅ Using cached model for {symbol}")
+                    return
             # Quick MLflow connectivity check
             if self.mlflow_client:
                 try:
                     # Test connection with longer timeout
                     import requests
-                    response = requests.get("http://localhost:5001/health", timeout=10)
+                    response = requests.get("http://localhost:5000/health", timeout=10)
                     if response.status_code != 200:
                         raise Exception("MLflow not healthy")
                         
@@ -1214,18 +1343,29 @@ class ProductionMLModel:
                 logger.warning(f"Created dummy model for {symbol} due to insufficient data")
                 return
             
-            # Create dummy training data with 29 features to match real models
+            # Create dummy training data with 39 features to match real models
             n_samples = min(100, len(hist) - 1)
-            X_dummy = np.random.randn(n_samples, 29)  # 29 features to match trained models
+            X_dummy = np.random.randn(n_samples, 39)  # 39 features to match trained models
             y_dummy = np.random.randn(n_samples) * 0.01  # Small returns
             
             if n_samples > 5:
-                # Fit scaler for 29 features and model
+                # Fit scaler for 39 features and model
                 self.scaler.fit(X_dummy)
                 self.scaler_fitted = True
                 X_scaled = self.scaler.transform(X_dummy)
                 self.model.fit(X_scaled, y_dummy)
-                logger.info(f"Created simple model for {symbol} with {n_samples} samples and 29 features")
+                logger.info(f"Created simple model for {symbol} with {n_samples} samples and 39 features")
+                
+                # Cache the model for faster future loading
+                import time
+                cache_key = f"{symbol}_{self.model_version}"
+                self.model_cache[cache_key] = {
+                    'model': self.model,
+                    'scaler': self.scaler,
+                    'scaler_fitted': self.scaler_fitted,
+                    'timestamp': time.time()
+                }
+                logger.info(f"🚀 Model cached for {symbol}")
             else:
                 # Fallback to dummy model - no scaler needed
                 self.model = type('DummyModel', (), {
@@ -1439,9 +1579,9 @@ class ProductionMLModel:
             # Convert to numpy array
             X = np.array(feature_vector).reshape(1, -1)
             
-            # Verify we have 29 features
-            if X.shape[1] != 29:
-                raise ValueError(f"Expected 29 features, got {X.shape[1]}")
+            # Verify we have 39 features
+            if X.shape[1] != 39:
+                raise ValueError(f"Expected 39 features, got {X.shape[1]}")
             
             # Scale features if scaler is available
             if self.scaler_fitted and self.scaler is not None:
@@ -1490,7 +1630,7 @@ ml_model = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize and cleanup resources"""
-    global db_engine, redis_client, mlflow_client, feature_engine, sentiment_analyzer, ml_model
+    global db_engine, redis_client, mlflow_client, feature_engine, sentiment_analyzer, ml_model, drift_detector, llm_service, rag_service
     
     logger.info("🚀 Starting Production MLOps API...")
     
@@ -1518,6 +1658,37 @@ async def lifespan(app: FastAPI):
         feature_engine = AdvancedFeatureEngine(redis_client)
         sentiment_analyzer = AdvancedSentimentAnalyzer()
         ml_model = ProductionMLModel(mlflow_client, db_engine)
+        
+        # Initialize drift detector
+        if DRIFT_DETECTION_AVAILABLE:
+            try:
+                drift_detector = ModelDriftDetector(
+                    database_path="drift_monitoring.db",
+                    monitoring_window=7
+                )
+                logger.info("✅ Drift detector initialized")
+            except Exception as e:
+                logger.error(f"❌ Failed to initialize drift detector: {e}")
+                drift_detector = None
+        
+        # Initialize RAG service
+        if RAG_AVAILABLE:
+            try:
+                rag_service = RAGService(redis_client)
+                await rag_service.initialize()
+                logger.info("✅ RAG service initialized")
+            except Exception as e:
+                logger.error(f"❌ Failed to initialize RAG service: {e}")
+                rag_service = None
+        
+        # Initialize LLM service (with RAG if available)
+        if LLM_AVAILABLE:
+            try:
+                llm_service = LLMService(redis_client, rag_service)
+                logger.info("✅ LLM service initialized")
+            except Exception as e:
+                logger.error(f"❌ Failed to initialize LLM service: {e}")
+                llm_service = None
         
         logger.info("🎉 All systems initialized successfully")
         
@@ -1621,6 +1792,79 @@ async def get_features_direct(symbol: str, version: str = "v1"):
     """Get features for a symbol directly from feature store"""
     return await feature_engine.get_features(symbol, version)
 
+@app.get("/feature-store/lineage/{feature_name}")
+async def get_feature_lineage(feature_name: str, version: str = "latest"):
+    """Get feature lineage information"""
+    try:
+        import sys
+        import os
+        sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+        from features.feature_store import RedisFeatureStore
+        
+        store = RedisFeatureStore()
+        lineage = store.get_feature_lineage(feature_name, version)
+        
+        if not lineage:
+            return {"error": f"Feature {feature_name} not found"}
+        
+        return {
+            "feature_name": feature_name,
+            "lineage": lineage,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting feature lineage: {e}")
+        return {"error": str(e)}
+
+@app.get("/feature-store/impact/{feature_name}")
+async def get_feature_impact_analysis(feature_name: str):
+    """Analyze impact of changing a feature"""
+    try:
+        import sys
+        import os
+        sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+        from features.feature_store import RedisFeatureStore
+        
+        store = RedisFeatureStore()
+        impact = store.get_feature_impact_analysis(feature_name)
+        
+        if not impact:
+            return {"error": f"Feature {feature_name} not found"}
+        
+        return {
+            "feature_name": feature_name,
+            "impact_analysis": impact,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Error analyzing feature impact: {e}")
+        return {"error": str(e)}
+
+@app.get("/feature-store/versions/{feature_name}")
+async def get_feature_versions(feature_name: str):
+    """Get all versions of a feature"""
+    try:
+        import sys
+        import os
+        sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+        from features.feature_store import RedisFeatureStore
+        
+        store = RedisFeatureStore()
+        versions = store.get_feature_versions(feature_name)
+        
+        return {
+            "feature_name": feature_name,
+            "versions": versions,
+            "total_versions": len(versions),
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting feature versions: {e}")
+        return {"error": str(e)}
+
 @app.get("/metrics")
 async def metrics():
     """Prometheus metrics endpoint"""
@@ -1703,6 +1947,475 @@ async def store_prediction(response: PredictionResponse, features: Dict, sentime
         
     except Exception as e:
         logger.error(f"Database storage error: {e}")
+
+# LLM-powered prediction explanation endpoints
+@app.post("/predict/explain", response_model=ExplanationResponse)
+async def explain_prediction(request: ExplanationRequest):
+    """Generate AI-powered explanation for stock prediction"""
+    start_time = asyncio.get_event_loop().time()
+    
+    if not llm_service:
+        raise HTTPException(status_code=503, detail="LLM service not available")
+    
+    try:
+        # Get prediction data (either from ID or generate new prediction)
+        if request.prediction_id:
+            # In production, fetch from database using prediction_id
+            prediction_data = await get_prediction_by_id(request.prediction_id)
+        else:
+            # Generate new prediction for explanation
+            prediction_data = await get_prediction_data_for_explanation(request.symbol)
+        
+        # Generate explanation
+        with LLM_LATENCY.time():
+            explanation_result = await llm_service.generate_explanation(
+                prediction_data=prediction_data,
+                use_cache=True
+            )
+        
+        # Generate risk assessment if requested
+        risk_assessment = None
+        if request.include_risk_assessment:
+            risk_result = await llm_service.assess_risk(
+                prediction_data=prediction_data,
+                use_cache=True
+            )
+            risk_assessment = risk_result.content
+        
+        processing_time = (asyncio.get_event_loop().time() - start_time) * 1000
+        
+        response = ExplanationResponse(
+            symbol=request.symbol,
+            explanation=explanation_result.content,
+            risk_assessment=risk_assessment,
+            model_used=explanation_result.model,
+            tokens_used=explanation_result.tokens_used,
+            cost_estimate=explanation_result.cost_estimate,
+            cached=explanation_result.cached,
+            timestamp=datetime.utcnow().isoformat() + "Z",
+            processing_time_ms=processing_time
+        )
+        
+        # Update metrics
+        LLM_REQUESTS.labels(model=explanation_result.model, request_type="explanation").inc()
+        LLM_TOKENS.labels(model=explanation_result.model).inc(explanation_result.tokens_used)
+        LLM_COST.set(explanation_result.cost_estimate)
+        
+        return response
+        
+    except Exception as e:
+        logger.error(f"Explanation generation error: {e}")
+        raise HTTPException(status_code=500, detail=f"Explanation failed: {str(e)}")
+
+@app.post("/market/research", response_model=MarketResearchResponse)
+async def market_research(request: MarketResearchRequest):
+    """AI-powered market research and analysis"""
+    start_time = asyncio.get_event_loop().time()
+    
+    if not llm_service:
+        raise HTTPException(status_code=503, detail="LLM service not available")
+    
+    try:
+        # Gather market context data
+        context_data = await gather_market_context(request.query, request.symbols)
+        
+        # Generate market analysis
+        with LLM_LATENCY.time():
+            research_result = await llm_service.analyze_market_research(
+                query=request.query,
+                context_data=context_data,
+                use_cache=True
+            )
+        
+        processing_time = (asyncio.get_event_loop().time() - start_time) * 1000
+        
+        response = MarketResearchResponse(
+            query=request.query,
+            analysis=research_result.content,
+            symbols_analyzed=request.symbols,
+            market_data_used=context_data.get('market_data', {}),
+            model_used=research_result.model,
+            tokens_used=research_result.tokens_used,
+            cost_estimate=research_result.cost_estimate,
+            cached=research_result.cached,
+            timestamp=datetime.utcnow().isoformat() + "Z",
+            processing_time_ms=processing_time
+        )
+        
+        # Update metrics
+        LLM_REQUESTS.labels(model=research_result.model, request_type="research").inc()
+        LLM_TOKENS.labels(model=research_result.model).inc(research_result.tokens_used)
+        LLM_COST.set(research_result.cost_estimate)
+        
+        return response
+        
+    except Exception as e:
+        logger.error(f"Market research error: {e}")
+        raise HTTPException(status_code=500, detail=f"Market research failed: {str(e)}")
+
+@app.get("/llm/stats")
+async def get_llm_stats():
+    """Get LLM service usage statistics"""
+    if not llm_service:
+        return {"status": "unavailable", "message": "LLM service not initialized"}
+    
+    try:
+        stats = await llm_service.get_usage_stats()
+        return {
+            "service_status": "operational",
+            "usage_stats": stats,
+            "timestamp": datetime.utcnow().isoformat() + "Z"
+        }
+    except Exception as e:
+        return {
+            "service_status": "error", 
+            "error": str(e),
+            "timestamp": datetime.utcnow().isoformat() + "Z"
+        }
+
+@app.post("/llm/compare-models")
+async def compare_llm_models(request: dict):
+    """Compare multiple LLM models on the same prompt"""
+    if not llm_service:
+        raise HTTPException(status_code=503, detail="LLM service not available")
+    
+    try:
+        prompt = request.get("prompt")
+        task_type = request.get("task_type", "prediction_explanation")
+        
+        if not prompt:
+            raise HTTPException(status_code=400, detail="prompt is required")
+        
+        comparison_results = await llm_service.compare_models(
+            prompt=prompt,
+            task_type=task_type
+        )
+        
+        return comparison_results
+        
+    except Exception as e:
+        logger.error(f"Model comparison error: {e}")
+        raise HTTPException(status_code=500, detail=f"Model comparison failed: {str(e)}")
+
+@app.get("/llm/hybrid-stats")
+async def get_hybrid_engine_stats():
+    """Get hybrid LLM engine statistics and model performance"""
+    if not llm_service:
+        return {"status": "unavailable", "message": "LLM service not initialized"}
+    
+    try:
+        stats = await llm_service.get_hybrid_engine_stats()
+        return stats
+    except Exception as e:
+        return {
+            "service_status": "error", 
+            "error": str(e),
+            "timestamp": datetime.utcnow().isoformat() + "Z"
+        }
+
+@app.post("/llm/evaluate-response")
+async def evaluate_response_quality(request: dict):
+    """Evaluate the quality of an LLM response"""
+    if not llm_service:
+        raise HTTPException(status_code=503, detail="LLM service not available")
+    
+    try:
+        response_text = request.get("response_text")
+        task_type = request.get("task_type", "prediction_explanation")
+        
+        if not response_text:
+            raise HTTPException(status_code=400, detail="response_text is required")
+        
+        evaluation_results = await llm_service.evaluate_response_quality(
+            response_text=response_text,
+            task_type=task_type
+        )
+        
+        return evaluation_results
+        
+    except Exception as e:
+        logger.error(f"Response evaluation error: {e}")
+        raise HTTPException(status_code=500, detail=f"Response evaluation failed: {str(e)}")
+
+@app.post("/llm/benchmark-models")
+async def benchmark_models(request: dict):
+    """Benchmark different models on multiple test prompts"""
+    if not llm_service:
+        raise HTTPException(status_code=503, detail="LLM service not available")
+    
+    try:
+        test_prompts = request.get("test_prompts", [])
+        task_type = request.get("task_type", "prediction_explanation")
+        
+        if not test_prompts:
+            raise HTTPException(status_code=400, detail="test_prompts is required")
+        
+        benchmark_results = []
+        
+        for i, prompt in enumerate(test_prompts):
+            comparison = await llm_service.compare_models(
+                prompt=prompt,
+                task_type=task_type
+            )
+            
+            benchmark_results.append({
+                "test_case": i + 1,
+                "prompt": prompt[:100] + "..." if len(prompt) > 100 else prompt,
+                "comparison": comparison
+            })
+        
+        # Calculate aggregate performance
+        model_aggregate = {}
+        for result in benchmark_results:
+            if "model_comparisons" in result["comparison"]:
+                for model_name, metrics in result["comparison"]["model_comparisons"].items():
+                    if model_name not in model_aggregate:
+                        model_aggregate[model_name] = {
+                            "total_accuracy": 0,
+                            "total_latency": 0,
+                            "total_cost": 0,
+                            "test_count": 0
+                        }
+                    
+                    eval_scores = metrics.get("evaluation_scores", {})
+                    model_aggregate[model_name]["total_accuracy"] += eval_scores.get("accuracy", 0)
+                    model_aggregate[model_name]["total_latency"] += metrics.get("latency_ms", 0)
+                    model_aggregate[model_name]["total_cost"] += metrics.get("cost_estimate", 0)
+                    model_aggregate[model_name]["test_count"] += 1
+        
+        # Calculate averages
+        for model_name in model_aggregate:
+            count = model_aggregate[model_name]["test_count"]
+            if count > 0:
+                model_aggregate[model_name]["avg_accuracy"] = model_aggregate[model_name]["total_accuracy"] / count
+                model_aggregate[model_name]["avg_latency_ms"] = model_aggregate[model_name]["total_latency"] / count
+                model_aggregate[model_name]["avg_cost"] = model_aggregate[model_name]["total_cost"] / count
+        
+        return {
+            "task_type": task_type,
+            "total_test_cases": len(test_prompts),
+            "individual_results": benchmark_results,
+            "aggregate_performance": model_aggregate,
+            "timestamp": datetime.utcnow().isoformat() + "Z"
+        }
+        
+    except Exception as e:
+        logger.error(f"Model benchmarking error: {e}")
+        raise HTTPException(status_code=500, detail=f"Benchmarking failed: {str(e)}")
+
+async def get_prediction_by_id(prediction_id: str) -> Dict[str, Any]:
+    """Retrieve prediction data by ID from database"""
+    # Simplified implementation - in production, query database
+    return {
+        "symbol": "AAPL",
+        "current_price": 150.0,
+        "predicted_price": 155.0,
+        "confidence": 0.75,
+        "technical_indicators": {"RSI": 45.2, "SMA_20": 149.5},
+        "news_headlines": ["Strong earnings reported"],
+        "sentiment_score": 0.65,
+        "model_type": "RandomForest",
+        "feature_importance": {"RSI": 0.3, "Volume": 0.2}
+    }
+
+async def get_prediction_data_for_explanation(symbol: str) -> Dict[str, Any]:
+    """Generate prediction data for explanation purposes"""
+    try:
+        # Get fresh features
+        features = await feature_engine.get_features(symbol)
+        
+        # Make prediction
+        prediction_result = await ml_model.predict(features)
+        
+        return {
+            "symbol": symbol,
+            "current_price": features.get('current_price', 0),
+            "predicted_price": prediction_result['predicted_price'],
+            "confidence": prediction_result['confidence'],
+            "technical_indicators": {k: v for k, v in features.items() if 'indicator' in k.lower()},
+            "news_headlines": [],
+            "sentiment_score": 0.5,
+            "model_type": prediction_result['model_version'],
+            "feature_importance": prediction_result.get('feature_importance', {})
+        }
+    except Exception as e:
+        logger.error(f"Error generating prediction data: {e}")
+        # Return mock data as fallback
+        return {
+            "symbol": symbol,
+            "current_price": 100.0,
+            "predicted_price": 102.5,
+            "confidence": 0.6,
+            "technical_indicators": {"RSI": 50.0, "SMA_20": 99.0},
+            "news_headlines": [],
+            "sentiment_score": 0.5,
+            "model_type": "RandomForest",
+            "feature_importance": {"RSI": 0.4, "Volume": 0.3}
+        }
+
+async def gather_market_context(query: str, symbols: List[str]) -> Dict[str, Any]:
+    """Gather market context for research queries"""
+    context = {"context": {}, "market_data": {}, "symbols": symbols}
+    
+    try:
+        # Gather data for each symbol
+        for symbol in symbols:
+            features = await feature_engine.get_features(symbol)
+            context["market_data"][symbol] = {
+                "current_price": features.get('current_price', 0),
+                "volume": features.get('volume', 0),
+                "rsi": features.get('rsi_14', 0),
+                "sma_20": features.get('sma_20', 0)
+            }
+        
+        # Add query context
+        context["context"]["query"] = query
+        context["context"]["symbols_requested"] = symbols
+        context["context"]["timestamp"] = datetime.utcnow().isoformat()
+        
+    except Exception as e:
+        logger.error(f"Error gathering market context: {e}")
+        # Return minimal context
+        context["context"]["error"] = str(e)
+    
+    return context
+
+# RAG (Retrieval-Augmented Generation) Management Endpoints
+@app.post("/rag/add-context")
+async def add_market_context(request: dict):
+    """Add market context documents to RAG vector store"""
+    if not rag_service:
+        raise HTTPException(status_code=503, detail="RAG service not available")
+    
+    try:
+        symbols = request.get("symbols", [])
+        collect_news = request.get("collect_news", True)
+        
+        results = await rag_service.add_market_context(
+            symbols=symbols,
+            collect_news=collect_news
+        )
+        
+        return {
+            "status": "success",
+            "symbols_processed": symbols,
+            "documents_added": results,
+            "timestamp": datetime.utcnow().isoformat() + "Z"
+        }
+        
+    except Exception as e:
+        logger.error(f"Error adding market context: {e}")
+        raise HTTPException(status_code=500, detail=f"Context addition failed: {str(e)}")
+
+@app.post("/rag/add-document")
+async def add_custom_document(request: dict):
+    """Add custom document to RAG vector store"""
+    if not rag_service:
+        raise HTTPException(status_code=503, detail="RAG service not available")
+    
+    try:
+        document_id = request.get("document_id")
+        text = request.get("text")
+        metadata = request.get("metadata", {})
+        source = request.get("source", "custom")
+        
+        if not document_id or not text:
+            raise HTTPException(status_code=400, detail="document_id and text are required")
+        
+        chunks_added = await rag_service.document_store.add_document(
+            document_id=document_id,
+            text=text,
+            metadata=metadata,
+            source=source
+        )
+        
+        return {
+            "status": "success",
+            "document_id": document_id,
+            "chunks_added": chunks_added,
+            "timestamp": datetime.utcnow().isoformat() + "Z"
+        }
+        
+    except Exception as e:
+        logger.error(f"Error adding document: {e}")
+        raise HTTPException(status_code=500, detail=f"Document addition failed: {str(e)}")
+
+@app.get("/rag/search")
+async def search_rag_documents(query: str, top_k: int = 5, threshold: float = 0.5):
+    """Search RAG vector store for relevant documents"""
+    if not rag_service:
+        raise HTTPException(status_code=503, detail="RAG service not available")
+    
+    try:
+        results = await rag_service.document_store.search_similar(
+            query=query,
+            top_k=top_k,
+            similarity_threshold=threshold
+        )
+        
+        search_results = []
+        for result in results:
+            chunk = result["chunk"]
+            search_results.append({
+                "text": chunk["text"][:500],  # Limit text length
+                "similarity": result["similarity"],
+                "source": chunk["metadata"].get("source", "unknown"),
+                "symbol": chunk["metadata"].get("symbol", ""),
+                "document_id": chunk["metadata"].get("document_id", ""),
+                "chunk_id": chunk.get("chunk_id", 0)
+            })
+        
+        return {
+            "query": query,
+            "results": search_results,
+            "total_results": len(search_results),
+            "timestamp": datetime.utcnow().isoformat() + "Z"
+        }
+        
+    except Exception as e:
+        logger.error(f"Error searching documents: {e}")
+        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
+
+@app.get("/rag/stats")
+async def get_rag_stats():
+    """Get RAG system statistics"""
+    if not rag_service:
+        return {"status": "unavailable", "message": "RAG service not initialized"}
+    
+    try:
+        stats = await rag_service.get_service_stats()
+        return stats
+    except Exception as e:
+        return {
+            "service_status": "error", 
+            "error": str(e),
+            "timestamp": datetime.utcnow().isoformat() + "Z"
+        }
+
+@app.delete("/rag/document/{document_id}")
+async def delete_rag_document(document_id: str):
+    """Delete document from RAG vector store"""
+    if not rag_service:
+        raise HTTPException(status_code=503, detail="RAG service not available")
+    
+    try:
+        deleted_count = await rag_service.document_store.delete_document(document_id)
+        
+        if deleted_count == 0:
+            raise HTTPException(status_code=404, detail="Document not found")
+        
+        return {
+            "status": "success",
+            "document_id": document_id,
+            "items_deleted": deleted_count,
+            "timestamp": datetime.utcnow().isoformat() + "Z"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting document: {e}")
+        raise HTTPException(status_code=500, detail=f"Document deletion failed: {str(e)}")
 
 # Automated Deployment Pipeline Integration
 try:
@@ -1949,6 +2662,284 @@ async def comprehensive_backtest(
     except Exception as e:
         logger.error(f"Backtesting error: {e}")
         raise HTTPException(status_code=500, detail=f"Backtesting failed: {str(e)}")
+
+# =============================================================================
+# DRIFT DETECTION ENDPOINTS
+# =============================================================================
+
+# Global drift detector instance
+drift_detector = None
+
+# Pydantic models for drift detection
+class DriftDetectionRequest(BaseModel):
+    model_id: str = Field(..., description="Model identifier")
+    symbol: str = Field(..., description="Stock symbol")
+    features: List[List[float]] = Field(..., description="Feature matrix for current data")
+    predictions: List[float] = Field(..., description="Model predictions")
+    actuals: Optional[List[float]] = Field(None, description="Actual values (if available)")
+
+class DriftAlert(BaseModel):
+    alert_id: str
+    timestamp: str
+    model_id: str
+    symbol: str
+    drift_type: str
+    severity: str
+    metric_name: str
+    baseline_value: float
+    current_value: float
+    threshold: float
+    confidence: float
+    description: str
+    recommendation: str
+    requires_retraining: bool
+
+class DriftMetricsResponse(BaseModel):
+    timestamp: str
+    model_id: str
+    symbol: str
+    psi_score: float
+    ks_statistic: float
+    ks_p_value: float
+    jensen_shannon_divergence: float
+    rmse_drift: float
+    mae_drift: float
+    r2_drift: float
+    overall_drift_score: float
+    drift_status: str
+    active_alerts: int
+
+@app.post("/drift/detect", response_model=DriftMetricsResponse)
+async def detect_model_drift(request: DriftDetectionRequest):
+    """
+    Run drift detection analysis on current model predictions
+    
+    This endpoint analyzes:
+    - Statistical drift (PSI, KS test, Jensen-Shannon divergence)
+    - Performance drift (RMSE, MAE, R² degradation)
+    - Concept drift (prediction pattern changes)
+    
+    Returns comprehensive drift metrics and generates alerts if significant drift detected.
+    """
+    if not DRIFT_DETECTION_AVAILABLE or drift_detector is None:
+        raise HTTPException(
+            status_code=503, 
+            detail="Drift detection service not available"
+        )
+    
+    try:
+        DRIFT_DETECTION_COUNTER.inc()
+        
+        # Convert to numpy arrays
+        features = np.array(request.features)
+        predictions = np.array(request.predictions)
+        actuals = np.array(request.actuals) if request.actuals else None
+        
+        # Run drift detection
+        drift_metrics = drift_detector.detect_drift(
+            request.model_id,
+            request.symbol,
+            features,
+            predictions,
+            actuals
+        )
+        
+        # Get active alerts count
+        active_alerts = len(drift_detector.get_active_alerts(request.model_id, request.symbol))
+        
+        logger.info(f"🔍 Drift detection completed for {request.model_id}_{request.symbol}: {drift_metrics.drift_status}")
+        
+        return DriftMetricsResponse(
+            timestamp=drift_metrics.timestamp,
+            model_id=drift_metrics.model_id,
+            symbol=drift_metrics.symbol,
+            psi_score=drift_metrics.psi_score,
+            ks_statistic=drift_metrics.ks_statistic,
+            ks_p_value=drift_metrics.ks_p_value,
+            jensen_shannon_divergence=drift_metrics.jensen_shannon_divergence,
+            rmse_drift=drift_metrics.rmse_drift,
+            mae_drift=drift_metrics.mae_drift,
+            r2_drift=drift_metrics.r2_drift,
+            overall_drift_score=drift_metrics.overall_drift_score,
+            drift_status=drift_metrics.drift_status,
+            active_alerts=active_alerts
+        )
+        
+    except Exception as e:
+        logger.error(f"Drift detection error: {e}")
+        raise HTTPException(status_code=500, detail=f"Drift detection failed: {str(e)}")
+
+@app.post("/drift/baseline/{model_id}/{symbol}")
+async def store_baseline_snapshot(
+    model_id: str, 
+    symbol: str,
+    request: DriftDetectionRequest
+):
+    """
+    Store baseline model performance snapshot for future drift detection
+    
+    This creates a reference point for detecting drift in:
+    - Feature distributions
+    - Model performance metrics  
+    - Prediction patterns
+    """
+    if not DRIFT_DETECTION_AVAILABLE or drift_detector is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Drift detection service not available"
+        )
+    
+    try:
+        features = np.array(request.features)
+        predictions = np.array(request.predictions)
+        actuals = np.array(request.actuals) if request.actuals else predictions  # Use predictions as fallback
+        
+        drift_detector.store_baseline_snapshot(
+            model_id,
+            symbol,
+            features,
+            predictions,
+            actuals
+        )
+        
+        logger.info(f"✅ Baseline snapshot stored for {model_id}_{symbol}")
+        
+        return {
+            "status": "success",
+            "message": f"Baseline snapshot stored for {model_id}_{symbol}",
+            "timestamp": datetime.now().isoformat(),
+            "feature_count": features.shape[1],
+            "sample_count": features.shape[0]
+        }
+        
+    except Exception as e:
+        logger.error(f"Baseline storage error: {e}")
+        raise HTTPException(status_code=500, detail=f"Baseline storage failed: {str(e)}")
+
+@app.get("/drift/alerts/{model_id}/{symbol}")
+async def get_drift_alerts(model_id: str, symbol: str):
+    """Get active drift alerts for a specific model and symbol"""
+    if not DRIFT_DETECTION_AVAILABLE or drift_detector is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Drift detection service not available"
+        )
+    
+    try:
+        alerts = drift_detector.get_active_alerts(model_id, symbol)
+        
+        return {
+            "model_id": model_id,
+            "symbol": symbol,
+            "active_alerts": len(alerts),
+            "alerts": [
+                {
+                    "alert_id": alert.alert_id,
+                    "timestamp": alert.timestamp,
+                    "drift_type": alert.drift_type,
+                    "severity": alert.severity,
+                    "metric_name": alert.metric_name,
+                    "baseline_value": alert.baseline_value,
+                    "current_value": alert.current_value,
+                    "threshold": alert.threshold,
+                    "description": alert.description,
+                    "recommendation": alert.recommendation,
+                    "requires_retraining": alert.requires_retraining
+                }
+                for alert in alerts
+            ]
+        }
+        
+    except Exception as e:
+        logger.error(f"Get alerts error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get alerts: {str(e)}")
+
+@app.get("/drift/history/{model_id}/{symbol}")
+async def get_drift_history(
+    model_id: str, 
+    symbol: str, 
+    days: int = 30
+):
+    """Get drift detection history for trend analysis"""
+    if not DRIFT_DETECTION_AVAILABLE or drift_detector is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Drift detection service not available"
+        )
+    
+    try:
+        history = drift_detector.get_drift_history(model_id, symbol, days)
+        
+        return {
+            "model_id": model_id,
+            "symbol": symbol,
+            "period_days": days,
+            "sample_count": len(history),
+            "history": [
+                {
+                    "timestamp": h.timestamp,
+                    "psi_score": h.psi_score,
+                    "ks_p_value": h.ks_p_value,
+                    "rmse_drift": h.rmse_drift,
+                    "mae_drift": h.mae_drift,
+                    "overall_drift_score": h.overall_drift_score,
+                    "drift_status": h.drift_status
+                }
+                for h in history
+            ],
+            "trends": {
+                "avg_psi_score": np.mean([h.psi_score for h in history]) if history else 0,
+                "avg_drift_score": np.mean([h.overall_drift_score for h in history]) if history else 0,
+                "stability_trend": "IMPROVING" if len(history) >= 2 and history[0].overall_drift_score < history[-1].overall_drift_score else "STABLE"
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Get drift history error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get drift history: {str(e)}")
+
+@app.get("/drift/summary/{model_id}/{symbol}")
+async def get_drift_summary(model_id: str, symbol: str):
+    """Get comprehensive drift analysis summary with actionable insights"""
+    if not DRIFT_DETECTION_AVAILABLE or drift_detector is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Drift detection service not available"
+        )
+    
+    try:
+        summary = drift_detector.get_drift_summary(model_id, symbol)
+        return summary
+        
+    except Exception as e:
+        logger.error(f"Get drift summary error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get drift summary: {str(e)}")
+
+@app.post("/drift/alerts/{alert_id}/resolve")
+async def resolve_drift_alert(alert_id: str):
+    """Mark a drift alert as resolved"""
+    if not DRIFT_DETECTION_AVAILABLE or drift_detector is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Drift detection service not available"
+        )
+    
+    try:
+        drift_detector.resolve_alert(alert_id)
+        
+        return {
+            "status": "success",
+            "message": f"Alert {alert_id} resolved",
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Resolve alert error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to resolve alert: {str(e)}")
+
+# Add drift detection metrics to Prometheus
+DRIFT_DETECTION_COUNTER = Counter('drift_detections_total', 'Total drift detection requests')
+DRIFT_ALERTS_GAUGE = Gauge('active_drift_alerts', 'Number of active drift alerts', ['model_id', 'symbol', 'severity'])
 
 if __name__ == "__main__":
     uvicorn.run(

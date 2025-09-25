@@ -1,0 +1,28 @@
+# Copy this file to terraform.tfvars and fill in your actual values
+# terraform.tfvars is gitignored for security
+
+# Project Configuration
+project_name = "betting-mlops"
+environment = "prod"
+aws_region = "us-east-1"
+
+# API Keys (Required)
+openai_api_key = "sk-proj-your-openai-key-here"
+news_api_key = "your-news-api-key-here"
+alpha_vantage_api_key = "your-alpha-vantage-key-here"
+
+# Infrastructure Sizing (Adjust for cost/performance)
+database_instance_class = "db.t3.micro"    # $15/month
+redis_instance_type = "cache.t3.micro"     # $12/month  
+fargate_cpu = 512                          # 0.5 vCPU
+fargate_memory = 1024                      # 1 GB RAM
+app_count = 2                              # Redundancy
+
+# Domain (Optional - leave blank to use AWS URLs)
+domain_name = ""
+create_domain = false
+
+# Cost optimization options:
+# - Use db.t3.nano for database ($7/month but limited performance)
+# - Use cache.t2.micro for Redis ($9/month)
+# - Reduce app_count to 1 (saves ~$10/month but no redundancy)
